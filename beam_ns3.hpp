@@ -120,7 +120,9 @@ namespace beam_ns3 {
 
     // Connect to another peer by index
     void connect(Index index) {
-      assert2(not tcp_sockets_.contains(index));
+      if (tcp_sockets_.contains(index)) {
+        return; // Already connected or connecting, do nothing
+      }
       auto socket = makeSocket();
       socket->Connect(ns3::InetSocketAddress{simulation.ips_.at(index), kPort});
       add(index, socket);
@@ -157,6 +159,15 @@ namespace beam_ns3 {
     void onAccept(SocketPtr socket, const ns3::Address &address) {
       auto index = simulation.ip_index_.at(
           ns3::InetSocketAddress::ConvertFrom(address).GetIpv4());
+
+      if (tcp_sockets_.contains(index)) {
+        // If we already have a socket for this peer (e.g., an outgoing connection we initiated,
+        // or a previously accepted one), this new incoming connection is redundant.
+        // Close the newly accepted socket and don't add it to avoid assertion failure in add().
+        socket->Close();
+        return;
+      }
+
       socket->SetRecvCallback(MakeCallback(&Application::pollRead, this));
       add(index, socket);
     }
@@ -307,3 +318,4 @@ namespace beam_ns3 {
     ns3::Simulator::Destroy();
   }
 }  // namespace beam_ns3
+

@@ -1,10 +1,9 @@
 import beam_ns3
 import random
-import math
 
 # --- Constants ---
-NUM_SUBNETS = 20  # As per user request
-PEERS_PER_SUBNET = 1024  # As per user request
+NUM_SUBNETS = 5  # As per user request
+PEERS_PER_SUBNET = 512  # As per user request
 NUM_BACKBONE_ROUTERS = 5  # From provided topology script
 
 # --- Global State ---
@@ -50,38 +49,73 @@ class App(beam_ns3.App):
             raise ValueError(f"Role info not found for index {self.index}")
 
         self.role = self.my_role_info["role"]
+        self.seen_signatures = set() # For gossiping
 
         if self.role == "peer":
             self.subnet_id = self.my_role_info["subnet_id"]
-            self.my_subnet_aggregator_idx = self.my_role_info["my_subnet_aggregator_idx"]
         elif self.role == "subnet_aggregator":
             self.subnet_id = self.my_role_info["subnet_id"]
             self.threshold = self.my_role_info["threshold"]
-            # Store the target global aggregator's index
             self.global_aggregator_idx_target = self.my_role_info["global_aggregator_idx"]
-            self.signatures_received_from_peers = set() # Stores indices of peers who sent signatures
+            self.signatures_received_from_peers = set() # Stores indices of peers whose signatures are counted for aggregation
             self.aggregation_sent_to_global = False
         elif self.role == "global_aggregator":
-            self.subnet_aggregations_received = set() # Stores subnet_ids from which aggregations are received
+            self.subnet_aggregations_received = set()
             self.expected_subnet_aggregations = NUM_SUBNETS
         else:
             self.print(f"FATAL: Unknown role '{self.role}' for index {self.index}.")
             raise ValueError(f"Unknown role: {self.role}")
 
+    def _get_gossip_targets(self, exclude_indices=None):
+        if exclude_indices is None:
+            exclude_indices = set()
+        current_exclusions = set(exclude_indices) # Make a copy
+        current_exclusions.add(self.index) # Don't send to self
+
+        all_potential_targets = []
+        for idx, info in role_map.items():
+            # Peers and Subnet Aggregators participate in signature gossip
+            if info["role"] in ["peer", "subnet_aggregator"]:
+                if idx not in current_exclusions:
+                    all_potential_targets.append(idx)
+        return all_potential_targets
+
+    async def gossip_signature(self, signature_content, num_to_send, origin_sender_idx=None):
+        """
+        Gossips the signature to a number of random peers/SAs.
+        origin_sender_idx is the peer from whom we received this signature (if any), to avoid sending it back.
+        """
+        exclude_from_gossip = set()
+        if origin_sender_idx is not None:
+            exclude_from_gossip.add(origin_sender_idx)
+
+        targets = self._get_gossip_targets(exclude_indices=exclude_from_gossip)
+
+        if not targets:
+            return
+
+        num_to_actually_send = min(num_to_send, len(targets))
+        chosen_targets = random.sample(targets, num_to_actually_send)
+
+        for target_idx in chosen_targets:
+            self.connect(target_idx)
+            self.send(target_idx, signature_content.encode())
+            await beam_ns3.co_sleep_us(random.randint(100, 500)) # Small delay
+
     async def on_start(self):
-        self.print(f"Node {self.index} starting with role: {self.role}")
+        self.print(f"Node {self.index} ({self.role}) starting.")
         if self.role == "peer":
-            self.print(f"Peer in subnet {self.subnet_id} (Node {self.index}) generating signature for SA {self.my_subnet_aggregator_idx}")
-            # Simulate some work / random delay before sending
-            await beam_ns3.co_sleep_us(random.randint(1000, 100000)) # 1ms to 100ms
             signature_content = f"signature_peer_{self.index}_subnet_{self.subnet_id}"
-            self.connect(self.my_subnet_aggregator_idx)
-            self.send(self.my_subnet_aggregator_idx, signature_content.encode())
-            self.print(f"Peer {self.index} sent signature to SA {self.my_subnet_aggregator_idx}")
+            self.print(f"Peer {self.index} (subnet {self.subnet_id}) generating signature: {signature_content[:50]}")
+            if signature_content not in self.seen_signatures: # Should be true for its own signature
+                self.seen_signatures.add(signature_content)
+                await beam_ns3.co_sleep_us(random.randint(1000, 100000)) # Simulate work
+                await self.gossip_signature(signature_content, num_to_send=6)
+
         elif self.role == "subnet_aggregator":
-            self.print(f"Subnet Aggregator for subnet {self.subnet_id} (Node {self.index}) waiting for {self.threshold} signatures.")
+            self.print(f"SA for subnet {self.subnet_id} (Node {self.index}) waiting for {self.threshold} signatures (via gossip).")
         elif self.role == "global_aggregator":
-            self.print(f"Global Aggregator (Node {self.index}) waiting for {self.expected_subnet_aggregations} subnet aggregations.")
+            self.print(f"GA (Node {self.index}) waiting for {self.expected_subnet_aggregations} subnet aggregations.")
 
     async def on_message(self, sender_index, message):
         try:
@@ -90,27 +124,34 @@ class App(beam_ns3.App):
             self.print(f"Node {self.index} ({self.role}) received undecodable message from {sender_index}")
             return
 
-        self.print(f"Node {self.index} ({self.role}) received message from {sender_index}: '{message_str[:70]}{'...' if len(message_str) > 70 else ''}'")
+        if self.role in ["peer", "subnet_aggregator"]:
+            if message_str.startswith("signature_peer_"):
+                if message_str not in self.seen_signatures:
+                    self.seen_signatures.add(message_str)
+                    # self.print(f"Node {self.index} ({self.role}) saw NEW signature from {sender_index}: '{message_str[:50]}...'. Gossiping.")
+                    await self.gossip_signature(message_str, num_to_send=6, origin_sender_idx=sender_index)
 
         if self.role == "subnet_aggregator":
             if message_str.startswith("signature_peer_"):
-                sender_info = role_map.get(sender_index)
-                if sender_info and sender_info["role"] == "peer" and sender_info.get("subnet_id") == self.subnet_id:
-                    if sender_index not in self.signatures_received_from_peers:
-                        self.signatures_received_from_peers.add(sender_index)
-                        self.print(f"SA for subnet {self.subnet_id} (Node {self.index}) received signature from peer {sender_index}. Total distinct signatures: {len(self.signatures_received_from_peers)}/{self.threshold}")
+                try:
+                    parts = message_str.split("_")
+                    originating_peer_idx = int(parts[2])
+                    originating_subnet_id = int(parts[4])
 
-                        if len(self.signatures_received_from_peers) >= self.threshold and not self.aggregation_sent_to_global:
-                            self.print(f"SA for subnet {self.subnet_id} (Node {self.index}) collected {len(self.signatures_received_from_peers)} signatures (threshold: {self.threshold}). Creating and sending aggregation to GA {self.global_aggregator_idx_target}.")
-                            aggregation_content = f"subnet_aggregation_subnet_{self.subnet_id}"
-                            self.connect(self.global_aggregator_idx_target)
-                            self.send(self.global_aggregator_idx_target, aggregation_content.encode())
-                            self.aggregation_sent_to_global = True
-                            self.print(f"SA for subnet {self.subnet_id} (Node {self.index}) sent aggregation to GA {self.global_aggregator_idx_target}.")
-                    # else:
-                        # self.print(f"SA for subnet {self.subnet_id} (Node {self.index}) received duplicate signature from peer {sender_index}.")
-                else:
-                    self.print(f"SA for subnet {self.subnet_id} (Node {self.index}) received signature from unexpected sender {sender_index} or sender not in this subnet. Sender info: {sender_info}")
+                    if originating_subnet_id == self.subnet_id:
+                        if originating_peer_idx not in self.signatures_received_from_peers:
+                            self.signatures_received_from_peers.add(originating_peer_idx)
+                            self.print(f"SA for subnet {self.subnet_id} (Node {self.index}) ACCEPTED signature from peer {originating_peer_idx} (subnet {originating_subnet_id}). Total distinct for SA: {len(self.signatures_received_from_peers)}/{self.threshold}")
+
+                            if len(self.signatures_received_from_peers) >= self.threshold and not self.aggregation_sent_to_global:
+                                self.print(f"SA for subnet {self.subnet_id} (Node {self.index}) met threshold ({self.threshold}). Sending aggregation to GA {self.global_aggregator_idx_target}.")
+                                aggregation_content = f"subnet_aggregation_subnet_{self.subnet_id}"
+                                self.connect(self.global_aggregator_idx_target)
+                                self.send(self.global_aggregator_idx_target, aggregation_content.encode())
+                                self.aggregation_sent_to_global = True
+                                self.print(f"SA for subnet {self.subnet_id} (Node {self.index}) SENT aggregation to GA {self.global_aggregator_idx_target}.")
+                except (IndexError, ValueError) as e:
+                    self.print(f"SA for subnet {self.subnet_id} (Node {self.index}) failed to parse signature: '{message_str[:50]}...'. Error: {e}")
 
         elif self.role == "global_aggregator":
             if message_str.startswith("subnet_aggregation_subnet_"):
@@ -127,8 +168,6 @@ class App(beam_ns3.App):
                             if len(self.subnet_aggregations_received) == self.expected_subnet_aggregations:
                                 self.print(f"GA (Node {self.index}) received all {self.expected_subnet_aggregations} subnet aggregations. Stopping simulation.")
                                 beam_ns3.stop()
-                        # else:
-                            # self.print(f"GA (Node {self.index}) received duplicate aggregation for subnet {received_subnet_id} from sender {sender_index}.")
                     else:
                         self.print(f"GA (Node {self.index}) received aggregation for subnet {received_subnet_id} from unexpected sender {sender_index} or mismatched SA. Sender info: {sender_info}")
                 except (IndexError, ValueError) as e:
@@ -174,14 +213,10 @@ def setup_network():
         beam_ns3.wire_peer(global_aggregator_idx, global_agg_router_connection_idx, wire_props_ga_conn)
         beam_ns3.print2(f"Connected Global Aggregator {global_aggregator_idx} to backbone router {global_agg_router_connection_idx}")
     else:
-        # If no backbone, GA is isolated or needs direct connections later.
-        # For this setup, it implies SAs might need to connect differently if no backbone path.
-        # However, the logic below connects regional routers to backbone.
         beam_ns3.print2(f"Global Aggregator {global_aggregator_idx} not connected to any backbone router (none exist).")
 
 
     # Create regional routers
-    # Ensure at least 1 region if NUM_SUBNETS > 0, to avoid division by zero or empty lists later.
     num_regions = max(1, NUM_SUBNETS // 8) if NUM_SUBNETS > 0 else 0
     regional_router_indices = []
     if num_regions > 0 :
@@ -213,7 +248,6 @@ def setup_network():
             subnet_router_indices.append(subnet_router_idx)
 
             if regional_router_indices:
-                # Distribute subnet routers among regional routers
                 region_for_subnet_router_idx = regional_router_indices[i % len(regional_router_indices)]
 
                 wire_props_subnet_to_regional = beam_ns3.WireProps(
@@ -223,8 +257,6 @@ def setup_network():
                 beam_ns3.wire_router(subnet_router_idx, region_for_subnet_router_idx, wire_props_subnet_to_regional)
                 beam_ns3.print2(f"Created subnet router {i} (Node {subnet_router_idx}), connected to regional router {region_for_subnet_router_idx}")
             else:
-                # If no regional routers, how do subnets connect? This implies a problem with earlier logic or constants.
-                # For now, they will be isolated unless connected directly to something else.
                 beam_ns3.print2(f"Created subnet router {i} (Node {subnet_router_idx}), but no regional routers to connect to.")
     else:
         beam_ns3.print2("No subnets to create.")
@@ -273,13 +305,11 @@ def setup_network():
             )
             beam_ns3.wire_peer(p_peer_idx, current_subnet_router_idx, wire_props_peer_to_subnet_router)
 
-            # Log sparsely for large numbers of peers
             if p_num % max(1, (PEERS_PER_SUBNET // 10)) == 0 or p_num == PEERS_PER_SUBNET -1 :
                  beam_ns3.print2(f"    Added peer {p_num+1}/{PEERS_PER_SUBNET} (Node {p_peer_idx}) to subnet {s_idx}, connected to SA {sa_peer_idx}")
 
     beam_ns3.print2("Realistic network topology setup complete.")
 
-    # Diagnostic: Print role counts
     counts = {"peer": 0, "subnet_aggregator": 0, "global_aggregator": 0, "unknown": 0}
     for node_info in role_map.values():
         counts[node_info.get("role", "unknown")] += 1
@@ -302,10 +332,6 @@ if __name__ == "__main__":
     elif global_aggregator_idx == -1 or global_aggregator_idx not in role_map:
         beam_ns3.print2(f"Error: Global aggregator index {global_aggregator_idx} is invalid or not found in role_map. Cannot reliably run simulation.")
     else:
-        # Pass the App class itself and a timeout to beam_ns3.run
-        # CPy in beam_ns3.py will instantiate App for each peer.
-        # Using a timeout of 1 hour (3600 seconds) as a safeguard.
-        # The simulation should stop earlier via beam_ns3.stop().
         beam_ns3.print2(f"Starting simulation with App factory. Timeout set to 3600 seconds.")
         beam_ns3.run(App, timeout_sec=3600)
         beam_ns3.print2("Simulation finished (either by beam_ns3.stop() or timeout).")
