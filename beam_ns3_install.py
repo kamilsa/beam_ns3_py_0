@@ -58,6 +58,8 @@ def build_from_source():
                 cli,
                 "configure",
                 "--enable-python-bindings",
+                "--enable-modules=core,network,internet,point-to-point,applications,nix-vector-routing",
+                "--build-profile=optimized"
             ]
         )
         subprocess.check_call([cli, "build"])
