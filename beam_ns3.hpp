@@ -21,7 +21,7 @@ namespace beam_ns3 {
   using Message = std::vector<uint8_t>;     // Message payload type
   using TimerId = uint32_t;                 // Timer identifier type
 
-  // Default port used for all TCP connections
+  // Default port used for all UDP connections
   const uint16_t kPort = 10000;
 
   // Properties for network links/wires between nodes
@@ -101,39 +101,33 @@ namespace beam_ns3 {
 
     // Called by NS-3 when application starts
     void StartApplication() override {
-      listen();  // Start listening for incoming connections
+      listen();  // Start listening for incoming UDP packets
       simulation.cpy_->on_start(index_);  // Notify Python layer that peer has started
     }
 
-    // Setup TCP listener socket
+    // Setup UDP listener socket
     void listen() {
-      tcp_listener_ = makeSocket();
-      tcp_listener_->Bind(ns3::InetSocketAddress{
+      udp_socket_ = makeSocket();
+      udp_socket_->Bind(ns3::InetSocketAddress{
           ns3::Ipv4Address::GetAny(),
           kPort,
       });
-      tcp_listener_->Listen();
-      tcp_listener_->SetAcceptCallback(
-          ns3::MakeNullCallback<bool, SocketPtr, const ns3::Address &>(),
-          ns3::MakeCallback(&Application::onAccept, this));
+      udp_socket_->SetRecvCallback(
+          ns3::MakeCallback(&Application::pollRead, this));
     }
 
-    // Connect to another peer by index
+    // Connect to another peer by index (for UDP, just store the peer's information)
     void connect(Index index) {
-      if (tcp_sockets_.contains(index)) {
-        return; // Already connected or connecting, do nothing
-      }
-      auto socket = makeSocket();
-      socket->Connect(ns3::InetSocketAddress{simulation.ips_.at(index), kPort});
-      add(index, socket);
+      // For UDP, no connection is needed, just store the peer's IP
+      // We'll use it when sending messages
+      connected_peers_.insert(index);
     }
 
     // Send a message to another peer
     void send(Index index, const Message &message) {
       assert2(index != index_);  // Can't send to self
-      auto it = tcp_sockets_.find(index);
-      if (it == tcp_sockets_.end()) {
-        return;  // No connection to target peer
+      if (connected_peers_.find(index) == connected_peers_.end()) {
+        return;  // Not connected to this peer
       }
 
       // Create message with length prefix (4 bytes) + payload
@@ -144,74 +138,65 @@ namespace beam_ns3 {
 
       // Create and send NS-3 packet
       auto packet = ns3::Create<ns3::Packet>((const uint8_t *)message2.data(),
-                                             message2.size());
-      assert2(it->second->Send(packet) == message2.size());
+                                           message2.size());
+      ns3::InetSocketAddress remote(simulation.ips_.at(index), kPort);
+      udp_socket_->SendTo(packet, 0, remote);
     }
 
-    // Add a new socket connected to a peer
-    void add(Index index, SocketPtr socket) {
-      assert2(not tcp_sockets_.contains(index));
-      tcp_sockets_.emplace(index, socket);
-      tcp_socket_index_.emplace(socket, index);
-    }
-
-    // Callback when a new connection is accepted
-    void onAccept(SocketPtr socket, const ns3::Address &address) {
-      auto index = simulation.ip_index_.at(
-          ns3::InetSocketAddress::ConvertFrom(address).GetIpv4());
-
-      if (tcp_sockets_.contains(index)) {
-        // If we already have a socket for this peer (e.g., an outgoing connection we initiated,
-        // or a previously accepted one), this new incoming connection is redundant.
-        // Close the newly accepted socket and don't add it to avoid assertion failure in add().
-        socket->Close();
-        return;
-      }
-
-      socket->SetRecvCallback(MakeCallback(&Application::pollRead, this));
-      add(index, socket);
-    }
-
-    // Handle incoming data on a socket
+    // Handle incoming data on the socket
     void pollRead(SocketPtr socket) {
-      auto index = tcp_socket_index_.at(socket);
-      while (auto packet = socket->Recv()) {
-        // Append received data to buffer for this peer
-        auto &buffer = buffers_[index];
-        auto n = packet->GetSize();
-        buffer.resize(buffer.size() + n);
-        packet->CopyData(buffer.data() + buffer.size() - n, n);
+      ns3::Address from;
+      auto packet = socket->RecvFrom(from);
+      if (!packet) {
+        return;  // No data received
+      }
 
-        // Process complete messages in the buffer
-        while (buffer.size() >= 4) {
-          size_t at = 0;
-          auto size = decode_u32_be(buffer, at);  // Read message length
-          if (buffer.size() < at + size) {
-            break;  // Not enough data for complete message
-          }
+      // Extract sender's IP address and look up the corresponding peer index
+      ns3::InetSocketAddress address = ns3::InetSocketAddress::ConvertFrom(from);
+      ns3::Ipv4Address ipAddr = address.GetIpv4();
 
-          // Extract and deliver message
-          Message message;
-          message.assign(buffer.begin() + at, buffer.begin() + at + size);
-          at += size;
-          buffer.erase(buffer.begin(), buffer.begin() + at);  // Remove processed data
-          simulation.cpy_->on_message(index_, index, message);
+      // Find the peer index for this IP address
+      auto it = simulation.ip_index_.find(ipAddr);
+      if (it == simulation.ip_index_.end()) {
+        return;  // Unknown sender
+      }
+
+      Index sender_index = it->second;
+
+      // Extract packet data
+      auto n = packet->GetSize();
+      auto &buffer = buffers_[sender_index];
+      uint32_t old_size = buffer.size();
+      buffer.resize(old_size + n);
+      packet->CopyData(buffer.data() + old_size, n);
+
+      // Process complete messages in the buffer
+      while (buffer.size() >= 4) {
+        size_t at = 0;
+        auto size = decode_u32_be(buffer, at);  // Read message length
+        if (buffer.size() < at + size) {
+          break;  // Not enough data for complete message
         }
+
+        // Extract and deliver message
+        Message message;
+        message.assign(buffer.begin() + at, buffer.begin() + at + size);
+        at += size;
+        buffer.erase(buffer.begin(), buffer.begin() + at);  // Remove processed data
+        simulation.cpy_->on_message(index_, sender_index, message);
       }
     }
 
-    // Create a new TCP socket
+    // Create a new UDP socket
     SocketPtr makeSocket() {
       auto socket = ns3::Socket::CreateSocket(
-          GetNode(), ns3::TypeId::LookupByName("ns3::TcpSocketFactory"));
-      socket->SetRecvCallback(MakeCallback(&Application::pollRead, this));
+          GetNode(), ns3::TypeId::LookupByName("ns3::UdpSocketFactory"));
       return socket;
     }
 
     Index index_;                                       // This peer's index
-    SocketPtr tcp_listener_;                            // Listening socket
-    std::unordered_map<Index, SocketPtr> tcp_sockets_;  // Connections to other peers
-    std::unordered_map<SocketPtr, Index> tcp_socket_index_;  // Reverse lookup from socket to peer index
+    SocketPtr udp_socket_;                              // UDP socket for sending/receiving
+    std::unordered_set<Index> connected_peers_;         // Peers we are connected to
     std::unordered_map<Index, Message> buffers_;        // Message reassembly buffers for each peer
   };
 
@@ -270,7 +255,7 @@ namespace beam_ns3 {
           wire);
   }
 
-  // Initiate a TCP connection from one peer to another
+  // Initiate a UDP connection from one peer to another
   void socket_connect(Index peer1, Index peer2) {
     simulation.application(peer1)->connect(peer2);
   }
