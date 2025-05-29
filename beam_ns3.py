@@ -77,7 +77,10 @@ def init_mpi():
            os.environ.get('PMI_SIZE'):
 
             if hasattr(ns, 'MpiInterface'):
-                ns.MpiInterface.Enable(MPI.COMM_WORLD)
+                # get argc, argv
+                argc = len(sys.argv)
+                argv = sys.argv[:]
+                ns.MpiInterface.Enable(argc, argv)
                 mpi_enabled = True
                 mpi_rank = ns.MpiInterface.GetSystemId()
                 mpi_size = ns.MpiInterface.GetSize()
