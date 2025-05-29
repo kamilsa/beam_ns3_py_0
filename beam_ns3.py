@@ -75,7 +75,7 @@ def init_mpi():
            os.environ.get('PMI_SIZE'):
 
             if hasattr(ns, 'MpiInterface'):
-                ns.MpiInterface.Enable()
+                ns.MpiInterface.Enable(ns.MpiInterface.MPI_COMM_WORLD) # Use NORMAL_SIMULATOR
                 mpi_enabled = True
                 mpi_rank = ns.MpiInterface.GetSystemId()
                 mpi_size = ns.MpiInterface.GetSize()
