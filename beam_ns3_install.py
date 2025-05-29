@@ -58,8 +58,8 @@ def build_from_source():
                 cli,
                 "configure",
                 "--enable-python-bindings",
-                "--enable-modules=core,network,internet,point-to-point,applications,nix-vector-routing",
-                "--build-profile=optimized"
+                "--enable-modules=core,network,internet,point-to-point,applications,nix-vector-routing,mpi",  # Added 'mpi' module
+                "--build-profile=optimized",  # Ensured comma was not missing and this is a separate arg
                 "--enable-mpi"
             ]
         )
