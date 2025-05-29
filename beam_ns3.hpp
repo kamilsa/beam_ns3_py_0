@@ -6,6 +6,7 @@
 #include <ns3/internet-module.h>
 #include <ns3/network-module.h>
 #include <ns3/point-to-point-helper.h>
+#include <ns3/nix-vector-routing-module.h> // Added Nix-Vector Routing module
 
 // Custom assertion macro that provides better error information than standard assert
 #define assert2(c)                                       \
@@ -71,6 +72,9 @@ namespace beam_ns3 {
     Simulation() {
       // Initialize IP address pool for the simulation
       address_helper_.SetBase("10.1.1.0", "255.255.255.0");
+
+      // Configure to use Nix-Vector routing
+      internet_stack_.SetRoutingHelper(nix_routing_);
     }
 
     // Get Application instance for a given peer index
@@ -78,6 +82,7 @@ namespace beam_ns3 {
 
     ns3::InternetStackHelper internet_stack_;     // Helper for setting up internet stack on nodes
     ns3::Ipv4AddressHelper address_helper_;       // Helper for assigning IP addresses
+    ns3::NixVectorHelper<ns3::Ipv4RoutingHelper> nix_routing_;  // Helper for Nix-Vector routing
     ns3::NodeContainer peers_;                    // Container for peer nodes
     ns3::NodeContainer routers_;                  // Container for router nodes
     ns3::ApplicationContainer applications_;      // Container for applications
@@ -289,8 +294,8 @@ namespace beam_ns3 {
 
   // Run the simulation with Python callbacks
   void run(CPy *cpy, uint32_t timeout_sec) {
-    // Setup routing tables
-    ns3::Ipv4GlobalRoutingHelper::PopulateRoutingTables();
+    // With Nix-Vector routing, routes are computed on demand
+    // No need to call PopulateRoutingTables()
 
     // Start applications at time 0
     simulation.applications_.Start(ns3::Seconds(0));
