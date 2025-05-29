@@ -5,6 +5,8 @@ import cppyy
 import sys
 import os
 
+from mpi4py import MPI
+
 cppyy.include("beam_ns3.hpp")
 beam_ns3 = cppyy.gbl.beam_ns3
 
@@ -75,7 +77,7 @@ def init_mpi():
            os.environ.get('PMI_SIZE'):
 
             if hasattr(ns, 'MpiInterface'):
-                ns.MpiInterface.Enable(ns.MpiInterface.MPI_COMM_WORLD) # Use NORMAL_SIMULATOR
+                ns.MpiInterface.Enable(MPI.COMM_WORLD)
                 mpi_enabled = True
                 mpi_rank = ns.MpiInterface.GetSystemId()
                 mpi_size = ns.MpiInterface.GetSize()
