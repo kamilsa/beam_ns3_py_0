@@ -6,6 +6,8 @@
 #include <ns3/internet-module.h>
 #include <ns3/network-module.h>
 #include <ns3/point-to-point-helper.h>
+#include <ns3/mpi-interface.h> // Added MPI module
+#include <ns3/mpi-module.h>    // Added MPI module
 
 // Custom assertion macro that provides better error information than standard assert
 #define assert2(c)                                       \

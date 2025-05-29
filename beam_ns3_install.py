@@ -60,6 +60,7 @@ def build_from_source():
                 "--enable-python-bindings",
                 "--enable-modules=core,network,internet,point-to-point,applications,nix-vector-routing",
                 "--build-profile=optimized"
+                "--enable-mpi"
             ]
         )
         subprocess.check_call([cli, "build"])
@@ -102,7 +103,7 @@ except ModuleNotFoundError:
 import cppyy
 
 try:
-    import ns
+        build_from_source()
 except ModuleNotFoundError:
     if is_macos():
         build_from_source()
