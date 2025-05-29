@@ -49,6 +49,13 @@ def build_from_source():
             )
             os.rename(name_archive_tmp, name_archive)
         subprocess.check_call(["tar", "-xf", name_archive])
+
+    # Ensure a clean build by removing the old build directory
+    build_dir_ns3 = os.path.join(dir1, "build")
+    if os.path.isdir(build_dir_ns3):
+        print(f"Removing existing NS-3 build directory: {build_dir_ns3}")
+        subprocess.check_call(["rm", "-rf", build_dir_ns3])
+
     dir2 = os.path.join(dir1, "build/bindings/python")
     if not os.path.isdir(dir2):
         print("installing ns3...")
